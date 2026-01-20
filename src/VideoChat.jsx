@@ -13,9 +13,9 @@ const VideoChat = () => {
   const remoteVideosRef = useRef({});
   const pendingPeersRef = useRef(new Set());
 
-  const SOCKET_SERVER_URL = "http://localhost:5000";
+  // const SOCKET_SERVER_URL = "http://localhost:5000";
 
-  // const SOCKET_SERVER_URL = "https://avah-tetrasyllabic-bernardo.ngrok-free.dev";
+  const SOCKET_SERVER_URL = "https://avah-tetrasyllabic-bernardo.ngrok-free.dev";
 
   // ✅ userLeftHandler - MISSING BEFORE!
   const userLeftHandler = useCallback((userId) => {
