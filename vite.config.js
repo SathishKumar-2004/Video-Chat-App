@@ -8,6 +8,6 @@ export default defineConfig({
       'avah-tetrasyllabic-bernardo.ngrok-free.dev'
     ]
   },
-  plugins: [react],
+  plugins: [react()],
  
 })
