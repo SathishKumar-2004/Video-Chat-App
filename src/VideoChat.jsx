@@ -8,6 +8,10 @@ const VideoChat = () => {
   const [remoteStreams, setRemoteStreams] = useState({});
   const [peers, setPeers] = useState({});
   const [isConnected, setIsConnected] = useState(false);
+  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  const [isInRoom, setIsInRoom] = useState(false);
+
   const socketRef = useRef();
   const localVideoRef = useRef();
   const remoteVideosRef = useRef({});
@@ -15,13 +19,105 @@ const VideoChat = () => {
 
   // const SOCKET_SERVER_URL = "http://localhost:5000";
 
-  const SOCKET_SERVER_URL = "https://avah-tetrasyllabic-bernardo.ngrok-free.dev";
+   const SOCKET_SERVER_URL = "https://avah-tetrasyllabic-bernardo.ngrok-free.dev";
 
-  // ✅ userLeftHandler - MISSING BEFORE!
+  const toggleAudio = useCallback(() => {
+    if (localStream) {
+      const audioTracks = localStream.getAudioTracks();
+      audioTracks.forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsAudioEnabled(audioTracks[0]?.enabled ?? false);
+
+    }
+  }, [localStream]);
+  
+ // Helper function to create a black video track
+const createBlackVideoTrack = () => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 640;
+  canvas.height = 480;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'black';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  const stream = canvas.captureStream();
+  return stream.getVideoTracks()[0];
+};
+
+// ✅ Better Toggle Video (using black frames)
+const toggleVideo = useCallback(async () => {
+  if (!localStream) return;
+  
+  const videoTracks = localStream.getVideoTracks();
+  
+  if (isVideoEnabled) {
+    // Turn OFF: Stop real camera and replace with black video
+    videoTracks.forEach(track => track.stop());
+    
+    const blackTrack = createBlackVideoTrack();
+    
+    // Replace with black track in all peer connections
+    Object.values(peers).forEach(peerConnection => {
+      const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) {
+        sender.replaceTrack(blackTrack);
+      }
+    });
+    
+    // Replace in local stream
+    videoTracks.forEach(track => localStream.removeTrack(track));
+    localStream.addTrack(blackTrack);
+    
+    setIsVideoEnabled(false);
+    
+    // Update local video element
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  } else {
+    // Turn ON: Replace black track with real camera
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({ 
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } } 
+      });
+      
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      
+      // Remove black track
+      const oldTracks = localStream.getVideoTracks();
+      oldTracks.forEach(track => {
+        track.stop();
+        localStream.removeTrack(track);
+      });
+      
+      localStream.addTrack(newVideoTrack);
+      
+      // Replace in all peer connections
+      Object.values(peers).forEach(peerConnection => {
+        const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
+        if (sender) {
+          sender.replaceTrack(newVideoTrack);
+        } else {
+          peerConnection.addTrack(newVideoTrack, localStream);
+        }
+      });
+      
+      // Update local video element
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+      }
+      
+      setIsVideoEnabled(true);
+    } catch (err) {
+      console.error("Failed to restart video:", err);
+      alert("Could not turn on camera");
+    }
+  }
+}, [localStream, isVideoEnabled, peers]);
   const userLeftHandler = useCallback((userId) => {
     console.log("👋 User left:", userId);
-    
-    // Close peer connection
+
     setPeers(prev => {
       const peerConnection = prev[userId];
       if (peerConnection) {
@@ -33,7 +129,6 @@ const VideoChat = () => {
       return newPeers;
     });
 
-    // Remove remote stream
     setRemoteStreams(prev => {
       const newStreams = { ...prev };
       delete newStreams[userId];
@@ -41,7 +136,6 @@ const VideoChat = () => {
       return newStreams;
     });
 
-    // Cleanup pending peers
     pendingPeersRef.current.delete(userId);
   }, []);
 
@@ -119,11 +213,11 @@ const VideoChat = () => {
 
       console.log("✅ Creating SINGLE peer for:", targetUserId);
       const peerConnection = createPeerConnection(targetUserId);
-      
+
       if (peerConnection && initiateCall) {
         createOffer(peerConnection, targetUserId);
       }
-      
+
       return { ...prev, [targetUserId]: peerConnection };
     });
   }, [createPeerConnection]);
@@ -141,7 +235,7 @@ const VideoChat = () => {
   const offerHandler = useCallback(async ({ from, offer }) => {
     console.log("Offer from:", from);
     ensurePeerConnection(from, false);
-    
+
     setTimeout(() => {
       setPeers(prev => {
         const peerConnection = prev[from];
@@ -188,14 +282,13 @@ const VideoChat = () => {
     });
   }, []);
 
-  // ✅ COMPLETE SOCKET SETUP WITH userLeftHandler
   useEffect(() => {
     const socket = io(SOCKET_SERVER_URL, {
       transports: ["websocket"],
-      reconnectionAttempts:5,
-        extraHeaders: {
-      "ngrok-skip-browser-warning": "true"  // 🔥 THIS LINE
-    }
+      reconnectionAttempts: 5,
+      extraHeaders: {
+        "ngrok-skip-browser-warning": "true"
+      }
     });
     socketRef.current = socket;
 
@@ -206,26 +299,29 @@ const VideoChat = () => {
 
     socket.on("disconnect", () => setIsConnected(false));
 
-    // ✅ ALL HANDLERS REGISTERED
     socket.on("existing-users", existingUsersHandler);
     socket.on("user-joined", joinedUserHandler);
-    socket.on("user-left", userLeftHandler);  // ✅ NOW INCLUDED!
+    socket.on("user-left", userLeftHandler);
     socket.on("offer", offerHandler);
     socket.on("answer", answerHandler);
     socket.on("ice-candidate", iceCandidateHandler);
 
     return () => socket.disconnect();
   }, [existingUsersHandler, joinedUserHandler, userLeftHandler, offerHandler, answerHandler, iceCandidateHandler]);
-
-  const startLocalStream = async () => {
+  const startLocalStream = async (withVideo = true, withAudio = true) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+      const constraints = {
+        video: withVideo ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+        audio: withAudio
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setLocalStream(stream);
+      setIsVideoEnabled(withVideo);
+      setIsAudioEnabled(withAudio);
     } catch (err) {
       console.error("Camera error:", err);
+      alert("Failed to access camera/microphone. Please check permissions.");
     }
   };
 
@@ -234,16 +330,17 @@ const VideoChat = () => {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
-
   const joinRoom = () => {
-    if (roomId && localStream) {
+    if (roomId && isConnected) {
       socketRef.current.emit("join-room", { roomId, userId });
+      setIsInRoom(true);
     }
   };
 
   const leaveRoom = () => {
     socketRef.current.emit("leave-room");
     setRoomId("");
+    setIsInRoom(false);
     setRemoteStreams({});
     setPeers(prev => {
       Object.values(prev).forEach(pc => pc.close());
@@ -266,175 +363,238 @@ const VideoChat = () => {
   }, [remoteStreams]);
 
   return (
-   <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 p-6">
-  <div className="max-w-7xl mx-auto">
-    {/* Header */}
-    <div className="text-center mb-12">
-      <h1 className="text-5xl md:text-6xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent mb-4">
-        🎥 WebRTC Video Chat
-      </h1>
-      <p className="text-xl text-indigo-200 max-w-2xl mx-auto">
-        Real-time video calling with peer-to-peer WebRTC
-      </p>
-    </div>
-
-    {/* Controls Card */}
-    <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-3xl p-8 mb-12 shadow-2xl">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end mb-8">
-        {/* Room ID */}
-        <div className="md:col-span-2">
-          <label className="block text-sm font-semibold text-indigo-200 mb-3">
-            Enter Room ID
-          </label>
-          <div className="relative">
-            <input 
-              type="text"
-              placeholder="e.g., testroom, meeting-123"
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value)}
-              className="w-full px-5 py-4 bg-white/20 border border-white/30 rounded-2xl text-white placeholder-indigo-300 
-                         focus:outline-none focus:ring-4 focus:ring-indigo-500/50 focus:border-transparent
-                         backdrop-blur-sm transition-all duration-300 text-lg"
-            />
-            <div className="absolute right-4 top-1/2 -translate-y-1/2 text-indigo-400">
-              📍
-            </div>
-          </div>
-        </div>
-
-        {/* Buttons */}
-        <div className="space-y-3">
-          <button 
-            onClick={startLocalStream} 
-            disabled={localStream}
-            className="w-full py-4 px-6 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 
-                       text-white font-semibold rounded-2xl shadow-xl hover:shadow-2xl transform hover:-translate-y-1 
-                       transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none
-                       focus:outline-none focus:ring-4 focus:ring-emerald-500/50"
-          >
-            {localStream ? 'Camera ON' : 'Start Camera'}
-          </button>
-          
-          <button 
-            onClick={joinRoom} 
-            disabled={!roomId || !localStream || !isConnected}
-            className="w-full py-4 px-6 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700
-                       text-white font-semibold rounded-2xl shadow-xl hover:shadow-2xl transform hover:-translate-y-1 
-                       transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none
-                       focus:outline-none focus:ring-4 focus:ring-indigo-500/50"
-          >
-            Join Room
-          </button>
-        </div>
-
-        <button 
-          onClick={leaveRoom}
-          className="py-4 px-6 bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-600 hover:to-red-700
-                     text-white font-semibold rounded-2xl shadow-xl hover:shadow-2xl transform hover:-translate-y-1 
-                     transition-all duration-300 focus:outline-none focus:ring-4 focus:ring-rose-500/50"
-        >
-          Leave Room
-        </button>
-      </div>
-
-      {/* Status Row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 bg-white/5 backdrop-blur-sm p-6 rounded-2xl border border-white/10">
-        <div className="text-center">
-          <div className="w-12 h-12 mx-auto mb-2 rounded-2xl bg-gradient-to-r from-indigo-500 to-purple-500 flex items-center justify-center">
-            📶
-          </div>
-          <div className="text-indigo-200 font-semibold text-lg">{isConnected ? "✅ Connected" : "❌ Disconnected"}</div>
-          <div className="text-indigo-400 text-sm">Socket Status</div>
-        </div>
-        <div className="text-center">
-          <div className="w-12 h-12 mx-auto mb-2 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-500 flex items-center justify-center">
-            👤
-          </div>
-          <div className="text-white font-mono font-semibold text-lg bg-black/30 px-3 py-1 rounded-xl truncate max-w-[200px] mx-auto">
-            {userId.slice(-8)}
-          </div>
-          <div className="text-indigo-400 text-sm">Your ID</div>
-        </div>
-        <div className="text-center">
-          <div className="w-12 h-12 mx-auto mb-2 rounded-2xl bg-gradient-to-r from-blue-500 to-cyan-500 flex items-center justify-center">
-            👥
-          </div>
-          <div className="text-2xl font-bold text-white">{Object.keys(remoteStreams).length}</div>
-          <div className="text-indigo-400 text-sm">Active Peers</div>
-        </div>
-      </div>
-    </div>
-
-    {/* Videos Grid */}
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-      {/* Local Video */}
-      {localStream && (
-        <div className="group">
-          <div className="bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border-2 border-blue-500/50 backdrop-blur-xl 
-                         rounded-3xl p-8 shadow-2xl hover:shadow-3xl transition-all duration-500 group-hover:scale-[1.02]">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-                📹 You
-              </h3>
-              <div className="w-10 h-10 bg-white/20 rounded-2xl flex items-center justify-center backdrop-blur-sm">
-                🔴
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
+      <header className="border-b border-slate-700/50 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center">
+                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <div>
+                <h1 className="text-xl font-semibold text-white">VideoConnect</h1>
+                <p className="text-xs text-slate-400">Secure Real-Time Communication</p>
               </div>
             </div>
-            <video 
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="w-full max-w-md mx-auto rounded-2xl shadow-2xl object-cover"
-            />
+
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800/50 border border-slate-700">
+                <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                <span className="text-sm text-slate-300">{isConnected ? 'Connected' : 'Disconnected'}</span>
+              </div>
+
+              <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700">
+                <svg className="w-4 h-4 text-slate-400" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
+                </svg>
+                <span className="text-sm font-mono text-slate-300">{userId.slice(-8)}</span>
+              </div>
+            </div>
           </div>
         </div>
-      )}
+      </header>
 
-      {/* Remote Videos */}
-      <div className="space-y-6">
-        {Object.entries(remoteStreams).length === 0 ? (
-          <div className="bg-gradient-to-br from-purple-500/20 to-pink-500/20 border-2 border-purple-500/50 
-                         backdrop-blur-xl rounded-3xl p-16 text-center shadow-2xl hover:shadow-3xl">
-            <div className="w-24 h-24 mx-auto mb-6 rounded-3xl bg-white/20 flex items-center justify-center backdrop-blur-sm">
-              👥
+      <main className="max-w-7xl mx-auto px-6 py-8">
+        {}
+        <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-6 mb-8 shadow-xl">
+          <div className="flex flex-col lg:flex-row gap-4 items-end">
+            <div className="flex-1 min-w-0">
+              <label htmlFor="roomId" className="block text-sm font-medium text-slate-300 mb-2">
+                Room ID
+              </label>
+              <input
+                id="roomId"
+                type="text"
+                placeholder="Enter room ID (e.g., meeting-123)"
+                value={roomId}
+                onChange={(e) => setRoomId(e.target.value)}
+                disabled={isInRoom}
+                className="w-full px-4 py-3 bg-slate-900/50 border border-slate-600 rounded-xl text-white placeholder-slate-500
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
+                           transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Room ID input"
+              />
             </div>
-            <h3 className="text-3xl font-bold text-white mb-4">No Active Calls</h3>
-            <p className="text-xl text-indigo-200 max-w-md mx-auto">
-              Invite someone to join your room!
-            </p>
+
+            <div className="flex flex-wrap gap-3">
+              {!localStream ? (
+                <>
+                  <button
+                    onClick={() => startLocalStream(true, true)}
+                    className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl
+                               shadow-lg hover:shadow-xl transform hover:-translate-y-0.5
+                               transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900
+                               flex items-center gap-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    Connect Media
+                  </button>
+
+                </>
+              ) : null}
+
+              <button
+                onClick={joinRoom}
+                disabled={!roomId || !isConnected || isInRoom}
+                className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-medium rounded-xl
+                           shadow-lg hover:shadow-xl transform hover:-translate-y-0.5
+                           transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
+                           disabled:transform-none focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 focus:ring-offset-slate-900
+                           flex items-center gap-2"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+                </svg>
+                {isInRoom ? 'In Room' : 'Join Room'}
+              </button>
+
+              {isInRoom && (
+                <button
+                  onClick={leaveRoom}
+                  className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-xl
+                             shadow-lg hover:shadow-xl transform hover:-translate-y-0.5
+                             transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-900
+                             flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  Leave
+                </button>
+              )}
+            </div>
           </div>
-        ) : (
-          Object.entries(remoteStreams).map(([userId, stream]) => (
-            <div key={userId} className="group">
-              <div className="bg-gradient-to-br from-emerald-500/20 to-teal-500/20 border-2 border-emerald-500/50 
-                             backdrop-blur-xl rounded-3xl p-6 shadow-2xl hover:shadow-3xl transition-all duration-500 
-                             group-hover:scale-[1.02]">
-                <div className="flex items-center justify-between mb-4">
-                  <h4 className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-teal-400 bg-clip-text text-transparent">
-                    👤 {userId.slice(-6)}
-                  </h4>
-                  <div className="w-8 h-8 bg-white/20 rounded-xl flex items-center justify-center backdrop-blur-sm">
-                    🔴
+
+          {isInRoom && (
+            <div className="mt-4 pt-4 border-t border-slate-700/50 flex items-center justify-between">
+              <div className="flex items-center gap-4 text-sm">
+                <span className="text-slate-400">Participants:</span>
+                <span className="text-white font-semibold">{Object.keys(remoteStreams).length + 1}</span>
+              </div>
+
+            </div>
+          )}
+        </div>
+
+        {}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {}
+          {localStream && (
+            <div className="relative group">
+              <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl overflow-hidden shadow-xl">
+                <div className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5 bg-slate-900/80 backdrop-blur-sm rounded-lg border border-slate-700">
+                  <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                  <span className="text-sm font-medium text-white">You</span>
+                </div>
+
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full aspect-video object-cover bg-slate-900"
+                  aria-label="Your video stream"
+                />
+
+                {}
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-slate-900/95 to-transparent p-4">
+                  <div className="flex items-center justify-center gap-3">
+                    <button
+                      onClick={toggleAudio}
+                      className={`p-3 rounded-full transition-all ${
+                        isAudioEnabled
+                          ? 'bg-slate-800/80 hover:bg-slate-700'
+                          : 'bg-red-600 hover:bg-red-700'
+                      }`}
+                      aria-label={isAudioEnabled ? "Mute microphone" : "Unmute microphone"}
+                    >
+                      {isAudioEnabled ? (
+                        <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                        </svg>
+                      )}
+                    </button>
+
+                    <button
+                      onClick={toggleVideo}
+                      className={`p-3 rounded-full transition-all ${
+                        isVideoEnabled
+                          ? 'bg-slate-800/80 hover:bg-slate-700'
+                          : 'bg-red-600 hover:bg-red-700'
+                      }`}
+                      aria-label={isVideoEnabled ? "Turn off camera" : "Turn on camera"}
+                    >
+                      {isVideoEnabled ? (
+                        <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 3l18 18" />
+    </svg>
+                      )}
+                    </button>
                   </div>
                 </div>
-                <video 
-                  ref={(el) => {
-                    if (el) remoteVideosRef.current[userId] = el;
-                  }}
-                  autoPlay
-                  playsInline
-                  className="w-full rounded-2xl shadow-2xl object-cover aspect-video"
-                />
               </div>
             </div>
-          ))
-        )}
-      </div>
-    </div>
-  </div>
-</div>
+          )}
 
+          {}
+          {Object.entries(remoteStreams).length === 0 ? (
+            <div className="bg-slate-800/30 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-12 flex flex-col items-center justify-center text-center min-h-[400px]">
+              <div className="w-20 h-20 bg-slate-700/50 rounded-2xl flex items-center justify-center mb-4">
+                <svg className="w-10 h-10 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-semibold text-slate-300 mb-2">Waiting for participants</h3>
+              <p className="text-slate-500 max-w-sm">
+                Share the room ID with others to start your video conference
+              </p>
+            </div>
+          ) : (
+            Object.entries(remoteStreams).map(([userId, stream]) => (
+              <div key={userId} className="relative group">
+                <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl overflow-hidden shadow-xl">
+                  <div className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5 bg-slate-900/80 backdrop-blur-sm rounded-lg border border-slate-700">
+                    <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
+                    </svg>
+                    <span className="text-sm font-medium text-white font-mono">{userId.slice(-6)}</span>
+                  </div>
+
+                  <video
+                    ref={(el) => {
+                      if (el && stream) {
+                        remoteVideosRef.current[userId] = el;
+                        el.srcObject = stream;
+                        {console.log(stream)}
+                      }
+                    }}
+                    autoPlay
+                    playsInline
+                    className="w-full aspect-video object-cover bg-slate-900"
+                    aria-label={`Video stream from participant ${userId.slice(-6)}`}
+                  />
+                  
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </main>
+    </div>
   );
 };
 
